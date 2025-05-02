@@ -9,7 +9,10 @@ from lightning.pytorch.loggers.wandb import WandbLogger
 from torch import nn
 from torchvision import models
 from torchvision.models.alexnet import AlexNet
+from torchvision.models.swin_transformer import swin_t, swin_s, swin_b, Swin_T_Weights, Swin_S_Weights, Swin_B_Weights
 import torch
+
+import timm
 
 # Custom packages
 from src.metric import MyAccuracy
@@ -18,21 +21,106 @@ from src.util import show_setting
 
 
 # [TODO: Optional] Rewrite this class if you want
-class MyNetwork(AlexNet):
-    def __init__(self):
+### Vanila AlexNet
+# class MyNetwork(AlexNet):
+#     def __init__(self, num_classes: int = 1000, dropout: float = 0.5) -> None:
+#         super().__init__()
+
+#         self.features = nn.Sequential(
+#             nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
+#             nn.ReLU(inplace=True),
+#             nn.MaxPool2d(kernel_size=3, stride=2),
+#             nn.Conv2d(64, 192, kernel_size=5, padding=2),
+#             nn.ReLU(inplace=True),
+#             nn.MaxPool2d(kernel_size=3, stride=2),
+#             nn.Conv2d(192, 384, kernel_size=3, padding=1),
+#             nn.ReLU(inplace=True),
+#             nn.Conv2d(384, 256, kernel_size=3, padding=1),
+#             nn.ReLU(inplace=True),
+#             nn.Conv2d(256, 256, kernel_size=3, padding=1),
+#             nn.ReLU(inplace=True),
+#             nn.MaxPool2d(kernel_size=3, stride=2),
+#         )
+#         self.avgpool = nn.AdaptiveAvgPool2d((6, 6))
+#         self.classifier = nn.Sequential(
+#             nn.Dropout(p=dropout),
+#             nn.Linear(256 * 6 * 6, 4096),
+#             nn.ReLU(inplace=True),
+#             nn.Dropout(p=dropout),
+#             nn.Linear(4096, 4096),
+#             nn.ReLU(inplace=True),
+#             nn.Linear(4096, num_classes),
+#         )
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         x = self.features(x)
+#         x = self.avgpool(x)
+#         x = torch.flatten(x, 1)
+#         x = self.classifier(x)
+#         return x
+
+# Residual Block for MyNetwork
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
         super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, padding=0, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=1, padding=0, bias=False),
+            nn.BatchNorm2d(channels)
+        )
+        self.relu = nn.ReLU(inplace=True)
 
-        # [TODO] Modify feature extractor part in AlexNet
+    def forward(self, x):
+        out = self.block(x)
+        out += x
+        return self.relu(out)
 
+# AlexNet-based model for smaller inputs
+class MyNetwork(nn.Module):
+    def __init__(self, num_classes=1000, dropout=0.5):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # [TODO: Optional] Modify this as well if you want
+            nn.Conv2d(64, 192, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            ResidualBlock(192),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
+            nn.Conv2d(192, 384, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            ResidualBlock(384),
+
+            nn.Conv2d(384, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            ResidualBlock(256),
+
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d((3, 3))  # 6x6 → 3x3
+
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(256 * 3 * 3, 1024),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(1024, 512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, num_classes),
+        )
+
+    def forward(self, x):
         x = self.features(x)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         x = self.classifier(x)
         return x
-
 
 class SimpleClassifier(LightningModule):
     def __init__(self,
@@ -45,7 +133,24 @@ class SimpleClassifier(LightningModule):
 
         # Network
         if model_name == 'MyNetwork':
-            self.model = MyNetwork()
+            self.model = MyNetwork(num_classes=num_classes)
+        elif 'resnet' in model_name:
+            self.model = torch.hub.load('pytorch/vision:v0.10.0', model_name, pretrained=True)
+        elif 'efficientnet' in model_name:
+            self.model = timm.create_model(model_name, pretrained=False, num_classes=num_classes)
+        elif 'swin' in model_name:
+            if 't' in model_name:
+                # self.model = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
+                self.model = swin_t(weights=None)
+            elif 's' in model_name:
+                # self.model = swin_s(weights=Swin_S_Weights.IMAGENET1K_V1)
+                self.model = swin_s(weights=None)
+            elif 'b' in model_name:
+                # self.model = swin_b(weights=Swin_B_Weights.IMAGENET1K_V1)
+                self.model = swin_b(weights=None)
+            else:
+                raise ValueError(f"Unknown Swin model: {model_name}")
+            self.model.head = nn.Linear(self.model.head.in_features, num_classes)
         else:
             models_list = models.list_models()
             assert model_name in models_list, f'Unknown model name: {model_name}. Choose one from {", ".join(models_list)}'
